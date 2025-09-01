@@ -6,6 +6,7 @@ import PIL.ImageOps
 import PIL.ImageDraw
 import argparse
 import cv2
+import sklearn
 import scipy
 
 logger = logging.getLogger(__name__)
@@ -68,12 +69,99 @@ def extract_contour_points(img):
     contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
 
     if not contours:
-        return np.empty((0, 2))
+        return numpy.empty((0, 2))
 
     # Take the largest contour (assuming one glyph per image)
     contour = max(contours, key=cv2.contourArea)
     contour = contour[:, 0, :]  # reshape to Nx2
     return contour.astype(float)
+
+def extract_contour_from_image(img):
+    """
+    img: numpy array (grayscale or RGB). 
+         White background, dark glyph works best.
+    returns: Nx2 float32 array of contour points
+    """
+    if img.ndim == 3:  # convert RGB to grayscale
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    else:
+        gray = img
+
+    # Threshold (invert so glyph=white)
+    _, bw = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+
+    # Find contours
+    contours, _ = cv2.findContours(bw, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+
+    if not contours:
+        return numpy.zeros((0, 2), dtype=numpy.float32)
+
+    # Pick largest contour (by area)
+    contour = max(contours, key=cv2.contourArea)
+
+    # Flatten to Nx2
+    contour = contour[:, 0, :].astype(numpy.float32)
+    return contour
+
+def center_scale_pca(points):
+    P = points.astype(numpy.float32)
+    if P.shape[0] == 0:
+        return P
+    # center
+    c = P.mean(0, keepdims=True)
+    P -= c
+    # scale by bbox diagonal
+    x0, y0 = P.min(0); x1, y1 = P.max(0)
+    D = numpy.hypot(x1 - x0, y1 - y0) + 1e-8
+    P /= D
+    # PCA orientation
+    C = numpy.cov(P.T)
+    eigvals, eigvecs = numpy.linalg.eigh(C)
+    R = eigvecs[:, [1, 0]]  # reorder so major axis comes first
+    P = P @ R
+    # flip vertical if upside down
+    if P[:, 1].mean() < 0:
+        P[:, 1] *= -1
+    return P
+
+# --------------------------
+# 3. Distances
+# --------------------------
+def modified_hausdorff(A, B):
+    if len(A) == 0 or len(B) == 0:
+        return numpy.inf
+    D = sklearn.metrics.pairwise_distances(A, B)
+    return max(D.min(axis=1).mean(), D.min(axis=0).mean())
+
+def hausdorff(A, B):
+    if len(A) == 0 or len(B) == 0:
+        return numpy.inf
+    D = sklearn.metrics.pairwise_distances(A, B)
+    return max(D.min(axis=1).max(), D.min(axis=0).max())
+
+# --------------------------
+# 4. Utility to normalize from image
+# --------------------------
+def contour_from_image_normalized(img):
+    contour = extract_contour_from_image(img)
+    return center_scale_pca(contour)
+
+def auto_threshold_nn(dist_matrix):
+    """
+    dist_matrix: symmetric NxN with zeros on the diagonal.
+    Returns an unsupervised threshold via the knee in the 2-NN distances.
+    """
+    N = dist_matrix.shape[0]
+    nn2 = []
+    for i in range(N):
+        row = numpy.sort(dist_matrix[i][dist_matrix[i] > 0])  # exclude self
+        nn2.append(row[1] if len(row) > 1 else row[0])
+    nn2_sorted = numpy.sort(nn2)
+    # simple knee: largest discrete derivative
+    diffs = numpy.diff(nn2_sorted)
+    knee_idx = numpy.argmax(diffs)
+    T = nn2_sorted[knee_idx]
+    return float(T)
 
 # ---------- Distance Measures ----------
 def hausdorff_distance(contourA, contourB):
@@ -197,8 +285,11 @@ if __name__ == "__main__":
     logger.debug(f"Extracted {len(glyph_images)} glyph images.")
 
     # Save raw glyphs
+    glyph_image_files = []
     for idx, glyph in enumerate(glyph_images):
-        glyph.save(f"glyph_img_{idx:02d}.png")
+        glyph_filename = f"glyph_img_{idx:02d}.png"
+        glyph.save(glyph_filename)
+        glyph_image_files.append(glyph_filename)
 
     # Debug visualization
     debug_image = grayscale_image.copy()
@@ -218,15 +309,49 @@ if __name__ == "__main__":
 
     # Deduplicate - step 2
     # Pairwise comparison of Hausdorff distance on glyphs
-    for i, glyphA in enumerate(unique_glyphs):
-        contourA = extract_contour_points(numpy.array(glyphA))
-        for j, glyphB in enumerate(unique_glyphs):
-            if i >= j:
-                continue
-            contourB = extract_contour_points(numpy.array(glyphB))
-            distance = hausdorff_distance(contourA, contourB)
-            logger.debug(f"Hausdorff distance between glyph {i} and {j}: {distance:.2f}")
-            # TODO: Choose a threshold to use for hausdorff distance, ie what is the hausdorff distance for two similar glyphs?
+    # for i, glyphA in enumerate(unique_glyphs):
+    #     contourA = extract_contour_points(numpy.array(glyphA))
+    #     for j, glyphB in enumerate(unique_glyphs):
+    #         if i >= j:
+    #             continue
+    #         contourB = extract_contour_points(numpy.array(glyphB))
+    #         distance = hausdorff_distance(contourA, contourB)
+    #         logger.debug(f"Hausdorff distance between glyph {i} and {j}: {distance:.2f}")
+    #         # TODO: Choose a threshold to use for hausdorff distance, ie what is the hausdorff distance for two similar glyphs?
+
+    contours = []
+    for f in glyph_image_files:
+        img = cv2.imread(f, cv2.IMREAD_GRAYSCALE)
+        contour = contour_from_image_normalized(img)
+        contours.append(contour)
+
+    # Build distance matrix
+    N = len(contours)
+    D = numpy.zeros((N, N), dtype=numpy.float32)
+    for i in range(N):
+        for j in range(i+1, N):
+            d = modified_hausdorff(contours[i], contours[j])
+            D[i, j] = D[j, i] = d
+
+    # Show matrix
+    print("Pairwise Modified Hausdorff Distances:")
+    print(D)
+
+    import pdb; pdb.set_trace()
+
+    # Simple threshold example
+    THRESHOLD = 0.5
+    for i in range(N):
+        for j in range(i+1, N):
+            if D[i, j] <= THRESHOLD:
+                print(f"{glyph_image_files[i]} and {glyph_image_files[j]} are likely the same glyph.")
+                # Put the two glyphs together into an image side-by-side for comparison
+                glyphA = PIL.Image.open(glyph_image_files[i])
+                glyphB = PIL.Image.open(glyph_image_files[j])
+                combined = PIL.Image.new("L", (glyphA.width + glyphB.width, max(glyphA.height, glyphB.height)))
+                combined.paste(glyphA, (0, 0))
+                combined.paste(glyphB, (glyphA.width, 0))
+                combined.save(f"comparison_{i}_{j}.png")
 
     unique_glyphs = [glyph for glyph in unique_glyphs if glyph is not None]
 
