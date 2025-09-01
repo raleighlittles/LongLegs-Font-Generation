@@ -5,6 +5,8 @@ import PIL.Image
 import PIL.ImageOps
 import PIL.ImageDraw
 import argparse
+import cv2
+import scipy
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(filename="font_extractor.log", encoding="utf-8", level=logging.DEBUG)
@@ -55,6 +57,32 @@ def average_hash(pil_image, hash_size=HASH_SIZE):
     bit_array = pixel_array > mean_value
     return bit_array.tobytes()
 
+def extract_contour_points(img):
+    """
+    Takes a grayscale glyph image, returns contour points as Nx2 numpy array.
+    """
+    # Ensure binary
+    _, thresh = cv2.threshold(img, 127, 255, cv2.THRESH_BINARY_INV)
+
+    # Find contours
+    contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+
+    if not contours:
+        return np.empty((0, 2))
+
+    # Take the largest contour (assuming one glyph per image)
+    contour = max(contours, key=cv2.contourArea)
+    contour = contour[:, 0, :]  # reshape to Nx2
+    return contour.astype(float)
+
+# ---------- Distance Measures ----------
+def hausdorff_distance(contourA, contourB):
+    """
+    Symmetric Hausdorff distance between two contours.
+    """
+    d1 = scipy.spatial.distance.directed_hausdorff(contourA, contourB)[0]
+    d2 = scipy.spatial.distance.directed_hausdorff(contourB, contourA)[0]
+    return max(d1, d2)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Extract glyphs from a font image.")
@@ -179,7 +207,7 @@ if __name__ == "__main__":
         drawer.rectangle([min_x, min_y, max_x, max_y], outline="red", width=DEBUG_RECTANGLE_WIDTH)
     debug_image.save("bounding_boxes.png")
 
-    # Deduplicate
+    # Deduplicate - step 1
     unique_glyphs = []
     seen_hashes = {}
     for glyph in glyph_images:
@@ -187,6 +215,20 @@ if __name__ == "__main__":
         if glyph_hash not in seen_hashes:
             seen_hashes[glyph_hash] = True
             unique_glyphs.append(glyph)
+
+    # Deduplicate - step 2
+    # Pairwise comparison of Hausdorff distance on glyphs
+    for i, glyphA in enumerate(unique_glyphs):
+        contourA = extract_contour_points(numpy.array(glyphA))
+        for j, glyphB in enumerate(unique_glyphs):
+            if i >= j:
+                continue
+            contourB = extract_contour_points(numpy.array(glyphB))
+            distance = hausdorff_distance(contourA, contourB)
+            logger.debug(f"Hausdorff distance between glyph {i} and {j}: {distance:.2f}")
+            # TODO: Choose a threshold to use for hausdorff distance, ie what is the hausdorff distance for two similar glyphs?
+
+    unique_glyphs = [glyph for glyph in unique_glyphs if glyph is not None]
 
     # Save unique glyphs
     output_directory = os.path.join(os.getcwd(), "glyphs")
