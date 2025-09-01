@@ -9,25 +9,49 @@
 # If fontTools is not available, we'll still save the unique glyph PNGs and a mapping CSV.
 
 import os
-import io
-import math
-import hashlib
-import json
-import zipfile
-import sys
-import traceback
-import pathlib
+import logging
 import numpy
 import PIL.Image
 import PIL.ImageOps
 import PIL.ImageDraw
 import argparse
 
+logger = logging.getLogger(__name__)
+logging.basicConfig(filename="font_extractor.log", encoding='utf-8', level=logging.DEBUG)
+
+# Within each band, merge touching/nearby components into glyphs.
+# If one glyph is found inside of the bounds of another, do not treat them separately,
+# treat them as one glyph.
+def merge_band(band):
+    band.sort(key=lambda x:(x[1],x[3]))
+    merged = []
+    for item in band:
+        _, minx, maxx, miny, maxy = item
+        placed = False
+        for i, (mx0,mx1,my0,my1) in enumerate(merged):
+            # if overlap vertically strongly and close horizontally, merge
+            v_overlap = not (maxy < my0-4 or miny > my1+4)
+            h_close = (minx <= mx1 + 12)  # gap threshold
+            if v_overlap and h_close:
+                # merge
+                mx0 = min(mx0, minx); mx1 = max(mx1, maxx)
+                my0 = min(my0, miny); my1 = max(my1, maxy)
+                merged[i] = (mx0,mx1,my0,my1)
+                placed = True
+                break
+        if not placed:
+            merged.append((minx,maxx,miny,maxy))
+    return merged
+
+# Deduplicate glyphs using perceptual hash (simple avg hash)
+def ahash(im, size=16):
+    small = im.resize((size, size), PIL.Image.LANCZOS).convert("L")
+    arr = numpy.array(small, dtype=numpy.int16)
+    mean = arr.mean()
+    bits = arr > mean
+    return bits.tobytes()
 
 if __name__ == "__main__":
-
-    # base_path = zipfile.Path("/mnt/data")
-    # img_path = base_path / "vlcsnap-2025-06-16-22h49m47s707.png"
 
     parser = argparse.ArgumentParser(description="Extract glyphs from a font image.")
     parser.add_argument("--image", "-i", type=str, required=True, help="Path to the input image file.")
@@ -39,7 +63,7 @@ if __name__ == "__main__":
 
     # Load image
     img = PIL.Image.open(args.image).convert("L")
-    # Invert (glyphs are light on dark)
+    # Invert (glyphs are light on dark)screenshots/
     arr = numpy.array(img)
     # Normalize: threshold via Otsu-like heuristic
     thr = int(numpy.mean(arr) * 0.6)
@@ -47,6 +71,7 @@ if __name__ == "__main__":
     # Morphological clean: remove thin noise with min area
     # We'll do connected-component labeling
     h, w = bw.shape
+    logger.debug(f"Finished loading image; image size (height): {h}, width: {w}")
 
     labels = numpy.zeros((h, w), dtype=numpy.int32)
     label = 0
@@ -79,7 +104,7 @@ if __name__ == "__main__":
                 if y < bx[2]: bx[2]=y
                 if y > bx[3]: bx[3]=y
 
-    # Sort boxes based on size (area) descending
+    logger.debug(f"Found {len(boxes)} connected components.")
 
     sorted_boxes  = {k: v for k, v in sorted(boxes.items(), key=lambda item: (item[1][1]-item[1][0]+1)*(item[1][3]-item[1][2]+1), reverse=True)}
 
@@ -114,29 +139,7 @@ if __name__ == "__main__":
         if idx==args.num_rows: idx=args.num_rows-1
         bands[idx].append(comp)
 
-    # Within each band, merge touching/nearby components into glyphs.
-    # If one glyph is found inside of the bounds of another, do not treat them separately,
-    # treat them as one glyph.
-    def merge_band(band):
-        band.sort(key=lambda x:(x[1],x[3]))
-        merged = []
-        for item in band:
-            _, minx, maxx, miny, maxy = item
-            placed = False
-            for i, (mx0,mx1,my0,my1) in enumerate(merged):
-                # if overlap vertically strongly and close horizontally, merge
-                v_overlap = not (maxy < my0-4 or miny > my1+4)
-                h_close = (minx <= mx1 + 12)  # gap threshold
-                if v_overlap and h_close:
-                    # merge
-                    mx0 = min(mx0, minx); mx1 = max(mx1, maxx)
-                    my0 = min(my0, miny); my1 = max(my1, maxy)
-                    merged[i] = (mx0,mx1,my0,my1)
-                    placed = True
-                    break
-            if not placed:
-                merged.append((minx,maxx,miny,maxy))
-        return merged
+    logger.debug(f"Segmented into {len(bands)} bands based on {args.num_rows} rows.")
 
     for band in bands:
         glyph_boxes.extend(merge_band(band))
@@ -155,6 +158,8 @@ if __name__ == "__main__":
         pil = PIL.ImageOps.expand(pil, border=2, fill=255)
         glyph_imgs.append(pil)
 
+    logger.debug(f"Extracted {len(glyph_imgs)} glyph images.")
+
     # Save glyph images to file
     for i, im in enumerate(glyph_imgs):
         im.save(f"glyph_img_{i:02d}.png")
@@ -165,14 +170,6 @@ if __name__ == "__main__":
     for (minx,maxx,miny,maxy) in glyph_boxes:
         draw.rectangle([minx, miny, maxx, maxy], outline="red", width=3)
     debug_img.save("bounding_boxes.png")
-
-    # Deduplicate glyphs using perceptual hash (simple avg hash)
-    def ahash(im, size=16):
-        small = im.resize((size, size), PIL.Image.LANCZOS).convert("L")
-        arr = numpy.array(small, dtype=numpy.int16)
-        mean = arr.mean()
-        bits = arr > mean
-        return bits.tobytes()
 
     uniq = []
     seen = {}
@@ -189,12 +186,12 @@ if __name__ == "__main__":
             print(f"Duplicate glyph found: {key}")
 
     # Sort unique glyphs by approximate reading order (already roughly so)
-    out_dir = os.getcwd() / "glyphs"
-    out_dir.mkdir(exist_ok=True)
+    out_dir = os.path.join(os.getcwd(), "glyphs")
+    os.makedirs(out_dir, exist_ok=True)
     glyph_paths = []
     for i, im in enumerate(uniq):
-        p = out_dir / f"glyph_{i:02d}.png"
+        p = os.path.join(out_dir, f"glyph_{i:02d}.png")
         im.save(p)
         glyph_paths.append(str(p))
 
-    len(glyph_paths), glyph_paths[:5]
+    #len(glyph_paths), glyph_paths[:5]
