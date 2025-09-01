@@ -113,6 +113,8 @@ def center_scale_pca(points):
     # scale by bbox diagonal
     x0, y0 = P.min(0); x1, y1 = P.max(0)
     D = numpy.hypot(x1 - x0, y1 - y0) + 1e-8
+    if D < 1e-3: # Guard against the case of very small bounding boxes
+        return numpy.zeros((0, 2), dtype=numpy.float32)  # treat as empty
     P /= D
     # PCA orientation
     C = numpy.cov(P.T)
