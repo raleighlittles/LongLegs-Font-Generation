@@ -309,18 +309,6 @@ if __name__ == "__main__":
             seen_hashes[glyph_hash] = True
             unique_glyphs.append(glyph)
 
-    # Deduplicate - step 2
-    # Pairwise comparison of Hausdorff distance on glyphs
-    # for i, glyphA in enumerate(unique_glyphs):
-    #     contourA = extract_contour_points(numpy.array(glyphA))
-    #     for j, glyphB in enumerate(unique_glyphs):
-    #         if i >= j:
-    #             continue
-    #         contourB = extract_contour_points(numpy.array(glyphB))
-    #         distance = hausdorff_distance(contourA, contourB)
-    #         logger.debug(f"Hausdorff distance between glyph {i} and {j}: {distance:.2f}")
-    #         # TODO: Choose a threshold to use for hausdorff distance, ie what is the hausdorff distance for two similar glyphs?
-
     contours = []
     for f in glyph_image_files:
         img = cv2.imread(f, cv2.IMREAD_GRAYSCALE)
