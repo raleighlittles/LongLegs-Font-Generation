@@ -15,7 +15,7 @@ logging.basicConfig(filename="font_extractor.log", encoding="utf-8", level=loggi
 # ------------------------------
 # Configurable parameters
 # ------------------------------
-THRESHOLD_SCALE = 0.6          # scale applied to mean for binarization threshold
+BINARIZATION_THRESHOLD_SCALE = 0.6          # scale applied to mean for binarization threshold
 MIN_COMPONENT_AREA = 150       # discard smaller connected components
 COMPONENT_VERTICAL_TOLERANCE = 4
 COMPONENT_HORIZONTAL_GAP = 12
@@ -31,6 +31,7 @@ def merge_band(band_components):
     merged_boxes = []
 
     for component in band_components:
+        # component: (label_id, min_x, max_x, min_y, max_y)
         _, min_x, max_x, min_y, max_y = component
         placed = False
         for idx, (merge_x0, merge_x1, merge_y0, merge_y1) in enumerate(merged_boxes):
@@ -62,10 +63,12 @@ def extract_contour_points(img):
     """
     Takes a grayscale glyph image, returns contour points as Nx2 numpy array.
     """
-    # Ensure binary
+    # The first return value from `cv2.threshold` is the threshold value used,
+    # which we don't need since we're providing an explicit threshold (127)
     _, thresh = cv2.threshold(img, 127, 255, cv2.THRESH_BINARY_INV)
 
-    # Find contours
+    # Find contours - the second return value from `cv2.findContours` is the contour hierarchy,
+    # which we don't use in this context
     contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
 
     if not contours:
@@ -118,7 +121,8 @@ def center_scale_pca(points):
     P /= D
     # PCA orientation
     C = numpy.cov(P.T)
-    eigvals, eigvecs = numpy.linalg.eigh(C)
+    # eigenvalues are not used here
+    _, eigvecs = numpy.linalg.eigh(C)
     R = eigvecs[:, [1, 0]]  # reorder so major axis comes first
     P = P @ R
     # flip vertical if upside down
@@ -127,7 +131,7 @@ def center_scale_pca(points):
     return P
 
 # --------------------------
-# 3. Distances
+# Distances
 # --------------------------
 def modified_hausdorff(A, B):
     if len(A) == 0 or len(B) == 0:
@@ -142,7 +146,7 @@ def hausdorff(A, B):
     return max(D.min(axis=1).max(), D.min(axis=0).max())
 
 # --------------------------
-# 4. Utility to normalize from image
+# Utility to normalize from image
 # --------------------------
 def contour_from_image_normalized(img):
     contour = extract_contour_from_image(img)
@@ -190,7 +194,7 @@ if __name__ == "__main__":
     grayscale_array = numpy.array(grayscale_image)
 
     # Threshold binarization
-    threshold_value = int(numpy.mean(grayscale_array) * THRESHOLD_SCALE)
+    threshold_value = int(numpy.mean(grayscale_array) * BINARIZATION_THRESHOLD_SCALE)
     binary_array = (grayscale_array > threshold_value).astype(numpy.uint8) * 255
     height, width = binary_array.shape
     logger.debug(f"Loaded image with size (height={height}, width={width}).")
@@ -286,7 +290,6 @@ if __name__ == "__main__":
 
     logger.debug(f"Extracted {len(glyph_images)} glyph images.")
 
-    # Save raw glyphs
     glyph_image_files = []
     for idx, glyph in enumerate(glyph_images):
         glyph_filename = f"glyph_img_{idx:02d}.png"
@@ -300,7 +303,7 @@ if __name__ == "__main__":
         drawer.rectangle([min_x, min_y, max_x, max_y], outline="red", width=DEBUG_RECTANGLE_WIDTH)
     debug_image.save("bounding_boxes.png")
 
-    # Deduplicate - step 1
+    # Deduplicate using hashing
     unique_glyphs = []
     seen_hashes = {}
     for glyph in glyph_images:
@@ -327,24 +330,6 @@ if __name__ == "__main__":
     print("Pairwise Modified Hausdorff Distances:")
     print(D)
 
-    import pdb; pdb.set_trace()
-
-    # Simple threshold example
-    THRESHOLD = 0.5
-    for i in range(N):
-        for j in range(i+1, N):
-            if D[i, j] <= THRESHOLD:
-                print(f"{glyph_image_files[i]} and {glyph_image_files[j]} are likely the same glyph.")
-                # Put the two glyphs together into an image side-by-side for comparison
-                glyphA = PIL.Image.open(glyph_image_files[i])
-                glyphB = PIL.Image.open(glyph_image_files[j])
-                combined = PIL.Image.new("L", (glyphA.width + glyphB.width, max(glyphA.height, glyphB.height)))
-                combined.paste(glyphA, (0, 0))
-                combined.paste(glyphB, (glyphA.width, 0))
-                combined.save(f"comparison_{i}_{j}.png")
-
-    unique_glyphs = [glyph for glyph in unique_glyphs if glyph is not None]
-
     # Save unique glyphs
     output_directory = os.path.join(os.getcwd(), "glyphs")
     os.makedirs(output_directory, exist_ok=True)
@@ -353,3 +338,8 @@ if __name__ == "__main__":
         glyph_path = os.path.join(output_directory, f"glyph_{idx:02d}.png")
         glyph.save(glyph_path)
         glyph_paths.append(str(glyph_path))
+
+    # Delete original glyphs
+    for glyph_img in glyph_image_files:
+        if os.path.exists(glyph_img):
+            os.remove(glyph_img)
