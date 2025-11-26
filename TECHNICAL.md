@@ -31,14 +31,6 @@ Here:
 \alpha = \textit{THRESHOLD\_SCALE}
 ```
 
-There are two common alternatives worth knowing:
-
-[Otsu’s method](https://en.wikipedia.org/wiki/Otsu%27s_method): finds $T$ that minimizes intra-class variance (used in some helper functions).
-
-[Adaptive/local thresholding](https://en.wikipedia.org/wiki/Thresholding_(image_processing)): computes a local mean or median in a window and sets $T(x,y)=\text{localMean}(x,y)-C$. This is more robust to uneven illumination.
-
-Note on preprocessing: a small median or Gaussian filter reduces salt-and-pepper noise and improves connected-component stability.
-
 ## Connected components and bounding boxes
 
 After binarization we find connected foreground pixels using a 4-neighborhood BFS/DFS. Formally, we label each connected set $S_k \subset \mathbb{Z}^2$ and compute its bounding box:

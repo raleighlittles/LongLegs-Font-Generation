@@ -1,3 +1,10 @@
+# Mac
+.DS_Store
+*.log
+
+# Don't check in images
+**/*.png
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
